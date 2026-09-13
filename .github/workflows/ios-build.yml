@@ -1,0 +1,119 @@
+name: iOS Build
+
+# Builds the ziti CLI for arm64 iOS devices (jailbroken, iOS 15+).
+# There is no separate ziti-router binary: the ziti CLI *is* the router,
+# started with `ziti router run <config.yml>`.
+#
+# A macOS runner is required: the ios/arm64 target always uses external (cgo)
+# linking, so Go shells out to Apple clang and needs the iPhoneOS SDK, both of
+# which ship with Xcode. The wrapper below mirrors Go's own
+# misc/ios/clangwrap.sh, pointing clang at the iPhoneOS SDK instead of the
+# macOS SDK.
+#
+# Note: macOS runners are billed at a 10x minute rate on private repos.
+# If the image's Xcode no longer accepts 15.0 as a deployment target, pass an
+# older runner_label (e.g. macos-15) instead of the newest image.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ios_min_version:
+        description: "iOS deployment target (e.g. 15.0)"
+        required: false
+        default: "15.0"
+      runner_label:
+        description: "macOS runner label (macos-15, macos-15-intel, macos-26, macos-latest)"
+        required: false
+        default: "macos-15"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# keep at most one queued/running build per ref; a new run cancels the old one
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-build:
+    # macos-latest currently maps to the macOS 26 arm64 image, which is the
+    # most contended pool. Default to macos-15 and allow overriding per run.
+    runs-on: ${{ github.event.inputs.runner_label || 'macos-15' }}
+    steps:
+      - name: Git Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Go
+        uses: ./.github/actions/setup-go
+
+      - name: Install Ziti CI
+        uses: openziti/ziti-ci@v1
+
+      - name: Show toolchain info
+        shell: bash
+        run: |
+          set -x
+          go version
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+
+      # Go invokes $CC for cgo and for external linking. The wrapper forces
+      # -arch arm64 and the iPhoneOS SDK, so a macOS SDK can never leak in.
+      - name: Create iOS clang wrapper
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/clangwrap.sh" <<'EOF'
+          #!/bin/bash
+          set -e
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          CLANG="$(xcrun --sdk iphoneos --find clang)"
+          exec "$CLANG" -arch arm64 -isysroot "$SDK_PATH" \
+            -mios-version-min="${IOS_MIN_VERSION:-15.0}" "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/clangwrap.sh"
+          cat "$RUNNER_TEMP/clangwrap.sh"
+
+      - name: Build ziti for iOS
+        shell: bash
+        env:
+          CC: ${{ runner.temp }}/clangwrap.sh
+          GOOS: ios
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          IOS_MIN_VERSION: ${{ github.event.inputs.ios_min_version || '15.0' }}
+        run: |
+          set -x
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "$($(go env GOPATH)/bin/ziti-ci -q go-build-flags -n)" \
+            -o dist/ziti-ios-arm64 \
+            ./ziti
+
+      - name: Verify binary platform
+        shell: bash
+        run: |
+          set -x
+          file dist/ziti-ios-arm64
+          lipo -info dist/ziti-ios-arm64 || true
+          # must report platform IOS (not MACOS) and the requested minos
+          xcrun vtool -show-build dist/ziti-ios-arm64
+
+      # Best effort: an ad-hoc signature is harmless and some jailbreaks want
+      # at least one. Devices that reject it can sign on-device with `ldid -S`.
+      - name: Ad-hoc codesign
+        continue-on-error: true
+        shell: bash
+        run: codesign --force --sign - dist/ziti-ios-arm64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ziti-ios-arm64-${{ github.run_id }}
+          path: dist/
+          retention-days: 5

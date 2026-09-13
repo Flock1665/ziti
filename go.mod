@@ -5,6 +5,14 @@ go 1.26.4
 // pinned
 replace github.com/michaelquigley/pfxlog => github.com/michaelquigley/pfxlog v0.6.10
 
+// iOS: the upstream module compiles IOKit-based cgo code that the iPhoneOS SDK
+// rejects; see third_party/go-m1cpu/README.md
+replace github.com/shoenig/go-m1cpu => ./third_party/go-m1cpu
+
+// iOS: the upstream module compiles libproc-based cgo code that the iPhoneOS
+// SDK rejects; see third_party/gopsutil-v3/PATCHES.md
+replace github.com/shirou/gopsutil/v3 => ./third_party/gopsutil-v3
+
 require (
 	github.com/AppsFlyer/go-sundheit v0.6.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.1
